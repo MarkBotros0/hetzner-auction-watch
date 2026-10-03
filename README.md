@@ -48,5 +48,9 @@ summary page (Actions tab → click a run).
 - If a server with a CPU the script doesn't know fits the other rules, it's
   listed under "Unrecognised CPUs" in the run summary. Add it to `CPUS` in
   `watch.py` with its PassMark score to include it.
+- Every notification shows the best option right now with its details. When
+  nothing fits, it shows the closest one: the cheapest server that meets the
+  hardware rules but is over budget. Price drops are shown with their exact
+  time in `TIMEZONE` (Africa/Cairo); the feed doesn't say how much a drop will be.
 - To change the rules (budget, RAM, etc.) edit the settings at the top of `watch.py`.
 - To stop: Actions tab → the workflow → **⋯ → Disable workflow**.

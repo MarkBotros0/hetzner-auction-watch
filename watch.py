@@ -14,6 +14,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import zoneinfo
 
 # ---------------------------------------------------------------- settings
 FEED_URL = "https://www.hetzner.com/_resources/app/data/app/live_data_sb.json"
@@ -30,6 +31,7 @@ EUR_TO_USD = 1.115         # only used if the feed has no USD prices
 RENOTIFY_DROP_USD = 3.00   # notify again if a known server got this much cheaper
 TABLE_ROWS = 5
 STATUS_PRIORITY = "low"    # ntfy priority of the every-run status ping ("min" = silent, "default" = sound)
+TIMEZONE = "Africa/Cairo"  # for showing when the next price drop happens
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 
@@ -78,6 +80,12 @@ CPUS = {
     # Intel Xeon (only the fast ones; E3/E5/E-2xxx are excluded below)
     "xeon w-2295": (30000, "18/36"), "xeon gold 5412u": (42000, "24/48"),
 }
+
+try:
+    LOCAL_TZ = zoneinfo.ZoneInfo(TIMEZONE)
+    LOCAL_TZ_LABEL = TIMEZONE.split("/")[-1].replace("_", " ")
+except zoneinfo.ZoneInfoNotFoundError:  # e.g. Windows without the tzdata package
+    LOCAL_TZ, LOCAL_TZ_LABEL = dt.timezone.utc, "UTC"
 
 # CPUs the user explicitly does not want, however cheap (skipped silently).
 EXCLUDE = re.compile(
@@ -191,14 +199,16 @@ def disks_text(nvme):
 
 
 def next_drop(s, now):
+    """When the auction price drops next, e.g. 'in 8h 46m (Sun 10:15 Cairo)'."""
     if s.get("Prices", {}).get("fixed"):
-        return "fixed"
+        return "fixed price"
     t = s.get("Timer", {}) or {}
-    ts = t.get("ReduceNextTimestamp")
-    secs = (ts - now) if ts else t.get("ReduceNext")
-    if secs is None:
+    ts = t.get("ReduceNextTimestamp") or (now + t["ReduceNext"] if t.get("ReduceNext") else None)
+    if ts is None:
         return "?"
-    return f"{max(secs, 0) / 3600:.0f} h"
+    mins = max(int(ts - now), 0) // 60
+    when = dt.datetime.fromtimestamp(ts, LOCAL_TZ).strftime("%a %H:%M")
+    return f"in {mins // 60}h {mins % 60:02d}m ({when} {LOCAL_TZ_LABEL})"
 
 
 # -------------------------------------------------------------------- main
@@ -215,7 +225,8 @@ def main():
         summary(f"### Hetzner auction check - {stamp}\n\n**Check failed:** {e}\n")
         return
 
-    matches, unknown = [], []
+    # near = passes every rule except the budget (used to show the closest option)
+    matches, near, unknown = [], [], []
     for s in servers:
         hw = s.get("Hardware", {})
         name = hw.get("CPU", {}).get("Name", "?")
@@ -228,8 +239,7 @@ def main():
         total_eur = eur(prices.get("monthly")) + eur(s.get("IPPrices", {}).get("monthly"))
         if ram < MIN_RAM_GB or len(big_nvme) < MIN_NVME_COUNT or setup > 0:
             continue
-        if total_usd > MAX_TOTAL_USD + 1e-9:
-            continue
+        over_budget = total_usd > MAX_TOTAL_USD + 1e-9
         kind, mark, ct = cpu_info(name)
         row = {
             "id": str(s["Id"]),
@@ -245,12 +255,14 @@ def main():
             "link": f"{AUCTION_URL}#search={s['Id']}",
         }
         if kind == "known" and mark >= MIN_PASSMARK:
-            matches.append(row)
-        elif kind == "unknown":
+            (near if over_budget else matches).append(row)
+        elif kind == "unknown" and not over_budget:
             unknown.append(row)
 
     # As-fast-or-faster first, then best speed per dollar.
     matches.sort(key=lambda r: (r["mark"] < LAPTOP_PASSMARK, -r["mark"] / r["usd"]))
+    # Closest to the budget first.
+    near.sort(key=lambda r: r["usd"])
 
     notified = state["notified"]
     for r in matches:
@@ -274,6 +286,10 @@ def main():
         md.append(f"\n**My suggestion:** {suggestion(matches[0])}")
     else:
         md.append("No compatible options right now.")
+        if near:
+            c = near[0]
+            md.append(f"\n**Closest option** (${c['usd'] - MAX_TOTAL_USD:.2f} over budget): "
+                      f"{details(c)}")
     if unknown:
         md.append("\n**Unrecognised CPUs that pass RAM/NVMe/budget (check by hand, "
                   "and add them to `CPUS` in watch.py):**")
@@ -287,14 +303,7 @@ def main():
         top = new[0]
         title = (f"Match: {top['cpu'].replace('AMD ', '').replace('Intel Core ', '')}, "
                  f"{top['ram']}, {top['disks']} for ${top['usd']:.2f}/mo (#{top['id']})")
-        lines = []
-        for r in new[:5]:
-            lines.append(
-                f"#{r['id']} {r['cpu']} ({r['ct']}), {vs_laptop(r['mark'])} vs laptop; "
-                f"{r['ram']}; {r['disks']}; ${r['usd']:.2f}/mo (€{r['eur']:.2f}); {r['dc']}; "
-                f"next drop {r['drop']}\n{r['link']}"
-            )
-        body = ("\n\n".join(lines)
+        body = ("\n\n".join(details(r) for r in new[:5])
                 + f"\n\nMy suggestion: {suggestion(new[0])}"
                 + "\nHetzner bills hourly with no minimum term, so you can test and cancel cheaply.")
         notify(title, body, click=top["link"], buttons=auction_buttons(new))
@@ -303,14 +312,22 @@ def main():
         # keep the 200 most recent entries
         state["notified"] = dict(list(notified.items())[-200:])
     else:
-        title = (f"Hetzner check: {len(matches)} compatible, none new" if matches
-                 else "Hetzner check: no compatible options")
-        lines = [f"{stamp}: {len(servers)} servers in the feed."]
-        for r in matches[:3]:
-            lines.append(f"#{r['id']} {r['cpu']}, {r['ram']}, {r['disks']}, "
-                         f"${r['usd']:.2f}/mo, next drop {r['drop']}")
-        notify(title, "\n".join(lines), click=matches[0]["link"] if matches else AUCTION_URL,
-               priority=STATUS_PRIORITY, buttons=auction_buttons(matches))
+        best = (matches or near or [None])[0]
+        if matches:
+            title = f"Hetzner check: {len(matches)} compatible, none new"
+            lines = [f"Best option now:\n{details(best)}"]
+            if matches[1:3]:
+                lines.append("\n".join(f"Also: #{r['id']} {r['cpu']}, ${r['usd']:.2f}/mo"
+                                       for r in matches[1:3]))
+        elif best:
+            title = f"Hetzner check: no match, closest ${best['usd']:.2f}/mo (#{best['id']})"
+            lines = [f"Closest option now (${best['usd'] - MAX_TOTAL_USD:.2f} over your "
+                     f"${MAX_TOTAL_USD:.0f} budget):\n{details(best)}"]
+        else:
+            title, lines = "Hetzner check: no compatible options", []
+        lines.append(f"{stamp}: {len(servers)} servers in the feed.")
+        notify(title, "\n\n".join(lines), click=best["link"] if best else AUCTION_URL,
+               priority=STATUS_PRIORITY, buttons=auction_buttons(matches or near))
 
     # Touch the state roughly monthly so the repo stays "active" and GitHub
     # does not auto-disable the schedule after 60 days without activity.
@@ -321,6 +338,12 @@ def main():
 
     save_state(state)
     log(f"{len(matches)} compatible, {len(new)} new, {len(unknown)} unknown CPUs")
+
+
+def details(r):
+    return (f"#{r['id']} {r['cpu']} ({r['ct']}), {vs_laptop(r['mark'])} vs laptop; "
+            f"{r['ram']}; {r['disks']}; ${r['usd']:.2f}/mo (€{r['eur']:.2f}); {r['dc']}; "
+            f"next drop {r['drop']}\n{r['link']}")
 
 
 def auction_buttons(rows):
