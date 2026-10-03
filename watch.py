@@ -3,7 +3,8 @@
 
 Fetches the public auction feed, keeps servers that fit the rules below,
 writes a table of the top options to the GitHub Actions run summary every
-time, and sends a phone notification (ntfy.sh) only for NEW matches.
+time, and sends a phone notification (ntfy.sh) every run: a high-priority
+alert for NEW matches, a low-priority status update otherwise.
 """
 import datetime as dt
 import json
@@ -27,6 +28,7 @@ MAX_TOTAL_USD = 80.00      # server + IPv4, per month, excl. VAT
 EUR_TO_USD = 1.115         # only used if the feed has no USD prices
 RENOTIFY_DROP_USD = 3.00   # notify again if a known server got this much cheaper
 TABLE_ROWS = 5
+STATUS_PRIORITY = "low"    # ntfy priority of the every-run status ping ("min" = silent, "default" = sound)
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 
@@ -205,14 +207,9 @@ def main():
         servers = fetch_feed()
     except Exception as e:  # noqa: BLE001
         log(str(e))
-        if not state.get("failing"):
-            notify("Hetzner watch: check failed", f"{stamp}: {e}", priority="default")
-            state["failing"] = True
-            save_state(state)
+        notify("Hetzner watch: check failed", f"{stamp}: {e}", priority="default")
         summary(f"### Hetzner auction check - {stamp}\n\n**Check failed:** {e}\n")
         return
-    if state.pop("failing", None):
-        log("feed reachable again")
 
     matches, unknown = [], []
     for s in servers:
@@ -281,7 +278,7 @@ def main():
                       f"${r['usd']:.2f} (€{r['eur']:.2f})")
     summary("\n".join(md) + "\n")
 
-    # ---- phone notification (only for new matches)
+    # ---- phone notification (every run: an alert for new matches, a quiet status otherwise)
     if new:
         top = new[0]
         title = (f"Match: {top['cpu'].replace('AMD ', '').replace('Intel Core ', '')}, "
@@ -301,6 +298,15 @@ def main():
             notified[r["id"]] = r["usd"]
         # keep the 200 most recent entries
         state["notified"] = dict(list(notified.items())[-200:])
+    else:
+        title = (f"Hetzner check: {len(matches)} compatible, none new" if matches
+                 else "Hetzner check: no compatible options")
+        lines = [f"{stamp}: {len(servers)} servers in the feed."]
+        for r in matches[:3]:
+            lines.append(f"#{r['id']} {r['cpu']}, {r['ram']}, {r['disks']}, "
+                         f"${r['usd']:.2f}/mo, next drop {r['drop']}")
+        notify(title, "\n".join(lines),
+               click=matches[0]["link"] if matches else None, priority=STATUS_PRIORITY)
 
     # Touch the state roughly monthly so the repo stays "active" and GitHub
     # does not auto-disable the schedule after 60 days without activity.

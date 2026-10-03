@@ -1,7 +1,9 @@
 # Hetzner auction watch
 
-Checks the Hetzner Server Auction every 10 minutes with GitHub Actions and
-sends a phone notification (via ntfy) when a new server matches:
+Checks the Hetzner Server Auction every 5 minutes with GitHub Actions and
+sends a phone notification (via ntfy) on every run: a high-priority alert when
+a new server matches, and a low-priority status update otherwise
+(`STATUS_PRIORITY` in `watch.py`). A server matches when it has:
 
 - CPU at least ~20,000 PassMark (your i7-13700H is ~25,800); old i7/Xeon E3/E-2xxx/Ryzen 5 3600 etc. are skipped
 - 64 GB+ RAM, 2+ NVMe drives of 512 GB or more
@@ -40,9 +42,9 @@ summary page (Actions tab → click a run).
 ## Good to know
 
 - GitHub sometimes starts scheduled runs a few minutes late at busy times.
-- If the auction feed can't be fetched you get one alert, not one every 10 minutes.
-- Already-notified servers are stored in `state.json`; you're alerted again
-  only if one gets $3+ cheaper. Delete its line to be alerted again.
+- If the auction feed can't be fetched, every failed run sends a "check failed" notification.
+- Already-notified servers are stored in `state.json`; you get a high-priority
+  alert again only if one gets $3+ cheaper. Delete its line to be alerted again.
 - If a server with a CPU the script doesn't know fits the other rules, it's
   listed under "Unrecognised CPUs" in the run summary. Add it to `CPUS` in
   `watch.py` with its PassMark score to include it.
