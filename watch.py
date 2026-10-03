@@ -17,6 +17,7 @@ import urllib.request
 
 # ---------------------------------------------------------------- settings
 FEED_URL = "https://www.hetzner.com/_resources/app/data/app/live_data_sb.json"
+AUCTION_URL = "https://www.hetzner.com/sb/"
 STATE_FILE = "state.json"
 
 LAPTOP_PASSMARK = 25800    # Intel i7-13700H
@@ -105,14 +106,17 @@ def save_state(state):
         f.write("\n")
 
 
-def notify(title, body, click=None, priority="high"):
+def notify(title, body, click=AUCTION_URL, priority="high", buttons=()):
+    """Tapping the notification opens `click`; `buttons` are (label, url) pairs (max 3)."""
+    actions = "; ".join(f"view, {label.replace(',', '')}, {url}" for label, url in buttons[:3])
     if not NTFY_TOPIC:
-        log("NTFY_TOPIC not set - would have sent:\n" + title + "\n" + body)
+        log(f"NTFY_TOPIC not set - would have sent:\n{title}\n{body}\n"
+            f"[tap: {click}] [buttons: {actions or '-'}]")
         return
     # Title etc. go in the query string so non-ASCII characters (×, €) survive.
-    params = {"title": title, "priority": priority, "tags": "computer"}
-    if click:
-        params["click"] = click
+    params = {"title": title, "priority": priority, "tags": "computer", "click": click}
+    if actions:
+        params["actions"] = actions
     req = urllib.request.Request(
         f"{NTFY_SERVER.rstrip('/')}/{NTFY_TOPIC}?" + urllib.parse.urlencode(params),
         data=body.encode("utf-8"),
@@ -238,7 +242,7 @@ def main():
             "eur": round(total_eur, 2),
             "dc": s.get("Details", {}).get("Datacenter", {}).get("Name", "?"),
             "drop": next_drop(s, now),
-            "link": f"https://www.hetzner.com/sb/#search={s['Id']}",
+            "link": f"{AUCTION_URL}#search={s['Id']}",
         }
         if kind == "known" and mark >= MIN_PASSMARK:
             matches.append(row)
@@ -293,7 +297,7 @@ def main():
         body = ("\n\n".join(lines)
                 + f"\n\nMy suggestion: {suggestion(new[0])}"
                 + "\nHetzner bills hourly with no minimum term, so you can test and cancel cheaply.")
-        notify(title, body, click=top["link"])
+        notify(title, body, click=top["link"], buttons=auction_buttons(new))
         for r in new:
             notified[r["id"]] = r["usd"]
         # keep the 200 most recent entries
@@ -305,8 +309,8 @@ def main():
         for r in matches[:3]:
             lines.append(f"#{r['id']} {r['cpu']}, {r['ram']}, {r['disks']}, "
                          f"${r['usd']:.2f}/mo, next drop {r['drop']}")
-        notify(title, "\n".join(lines),
-               click=matches[0]["link"] if matches else None, priority=STATUS_PRIORITY)
+        notify(title, "\n".join(lines), click=matches[0]["link"] if matches else AUCTION_URL,
+               priority=STATUS_PRIORITY, buttons=auction_buttons(matches))
 
     # Touch the state roughly monthly so the repo stays "active" and GitHub
     # does not auto-disable the schedule after 60 days without activity.
@@ -317,6 +321,12 @@ def main():
 
     save_state(state)
     log(f"{len(matches)} compatible, {len(new)} new, {len(unknown)} unknown CPUs")
+
+
+def auction_buttons(rows):
+    """Notification buttons: the top two servers, then the full auction list."""
+    return [(f"#{r['id']} ${r['usd']:.0f}/mo", r["link"]) for r in rows[:2]] + [
+        ("All auctions", AUCTION_URL)]
 
 
 def suggestion(r):
