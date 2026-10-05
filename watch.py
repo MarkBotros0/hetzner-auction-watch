@@ -5,7 +5,9 @@ Goal: find a clear UPGRADE over the current server (see CURRENT SERVER below).
 Fetches the public auction feed, keeps servers that fit the upgrade rules below,
 writes a table of the top upgrades to the GitHub Actions run summary every
 time, and sends a phone notification (ntfy.sh) only when a NEW upgrade shows
-up. Runs without an upgrade (or with a failed fetch) stay silent.
+up, or the same server as the current one is listed for less than you pay.
+Runs without either (or with a failed fetch) stay silent. Tapping the
+notification opens the auction filtered to that server.
 
 Read-only: it only reads the public feed. It never buys, reserves, cancels or
 logs in - ordering, migrating and cancelling are always done by hand.
@@ -34,6 +36,11 @@ CURRENT_CPU = "Ryzen 7 PRO 1700X"
 CURRENT_SHORT = "1700X"
 CURRENT_PASSMARK = 14500
 CURRENT_USD = 61.90        # per month excl. VAT, incl. IPv4
+# Also alert when the same server (Ryzen 7 1700X, PRO or not, 64 GB+ RAM,
+# 2+ SSDs of 480 GB+, no setup fee) is listed for less than CURRENT_USD.
+SAME_CPU = "ryzen 7 1700x"
+SAME_MIN_RAM_GB = 64
+SAME_MIN_SSD_GB = 480
 
 # ---- Upgrade rules
 # Prices: the auction list shows prices excl. VAT and already including IPv4
@@ -183,9 +190,13 @@ def eur(price_obj):
     return float((price_obj or {}).get("EUR", 0) or 0)
 
 
+def norm_cpu(name):
+    """Lower-case CPU name with "PRO" removed, e.g. 'amd ryzen 7 1700x'."""
+    return re.sub(r"\s+", " ", re.sub(r"\bpro\b\s*", "", name.lower()))
+
+
 def cpu_info(name):
-    n = re.sub(r"\bpro\b\s*", "", name.lower())
-    n = re.sub(r"\s+", " ", n)
+    n = norm_cpu(name)
     if EXCLUDE.search(n):
         return "excluded", None, None
     best = None
@@ -262,7 +273,8 @@ def main():
 
     # near = known CPU that fails exactly one upgrade rule (shown with the reason
     # when there is no upgrade)
-    matches, near, unknown = [], [], []
+    # cheaper = the same server as the current one, listed for less
+    matches, near, unknown, cheaper = [], [], [], []
     for s in servers:
         hw = s.get("Hardware", {})
         name = hw.get("CPU", {}).get("Name", "?")
@@ -276,7 +288,27 @@ def main():
         # server + IPv4 = the price on the auction list (excl. VAT)
         total_usd = usd(prices.get("monthly")) + usd(s.get("IPPrices", {}).get("monthly"))
         total_eur = eur(prices.get("monthly")) + eur(s.get("IPPrices", {}).get("monthly"))
+        disks = " + ".join(t for t in (disks_text(nvme), disks_text(sata, "SATA SSD"),
+                                       disks_text(drives.get("hdd") or [], "HDD")) if t) or "no disks"
         kind, mark, ct = cpu_info(name)
+        row = {
+            "id": str(s["Id"]),
+            "cpu": name,
+            "ct": ct or "?",
+            "mark": mark,
+            "ram": f"{ram} GB{' ECC' if hw.get('RAM', {}).get('ecc') else ''}",
+            "disks": disks,
+            "usd": round(total_usd, 2),
+            "eur": round(total_eur, 2),
+            "dc": s.get("Details", {}).get("Datacenter", {}).get("Name", "?"),
+            "drop": next_drop(s, now),
+            "link": f"{AUCTION_URL}?freetext={s['Id']}",  # opens the auction filtered to this server
+        }
+        if SAME_CPU in norm_cpu(name):
+            if (ram >= SAME_MIN_RAM_GB and setup == 0 and round(total_usd, 2) < CURRENT_USD
+                    and len([d for d in ssds if d >= SAME_MIN_SSD_GB]) >= MIN_SSD_COUNT):
+                cheaper.append(dict(row, mark=CURRENT_PASSMARK, ct="8/16"))
+            continue
         if kind == "excluded":
             continue
         fails = []
@@ -290,22 +322,7 @@ def main():
             fails.append(f"${setup:.2f} setup fee")
         if total_usd > MAX_TOTAL_USD + 1e-9:
             fails.append(f"${total_usd - MAX_TOTAL_USD:.2f} over the ${MAX_TOTAL_USD:.0f} budget")
-        disks = " + ".join(t for t in (disks_text(nvme), disks_text(sata, "SATA SSD"),
-                                       disks_text(drives.get("hdd") or [], "HDD")) if t) or "no disks"
-        row = {
-            "id": str(s["Id"]),
-            "cpu": name,
-            "ct": ct or "?",
-            "mark": mark,
-            "ram": f"{ram} GB{' ECC' if hw.get('RAM', {}).get('ecc') else ''}",
-            "disks": disks,
-            "usd": round(total_usd, 2),
-            "eur": round(total_eur, 2),
-            "dc": s.get("Details", {}).get("Datacenter", {}).get("Name", "?"),
-            "drop": next_drop(s, now),
-            "link": f"{AUCTION_URL}#search={s['Id']}",
-            "why": "; ".join(fails),
-        }
+        row["why"] = "; ".join(fails)
         if kind == "unknown":
             if not fails:
                 unknown.append(row)
@@ -318,12 +335,14 @@ def main():
     matches.sort(key=lambda r: (r["mark"] < LAPTOP_PASSMARK, -r["mark"] / r["usd"]))
     # Cheapest near-miss first.
     near.sort(key=lambda r: r["usd"])
+    cheaper.sort(key=lambda r: r["usd"])
 
     notified = state["notified"]
-    for r in matches:
+    for r in matches + cheaper:
         prev = notified.get(r["id"])
         r["new"] = prev is None or r["usd"] <= float(prev) - RENOTIFY_DROP_USD
     new = [r for r in matches if r["new"]]
+    new_cheaper = [r for r in cheaper if r["new"]]
 
     # ---- run summary (always)
     md = [f"### Hetzner auction check - {stamp}",
@@ -349,6 +368,10 @@ def main():
             c = near[0]
             md.append(f"\n**Cheapest near-miss** (failed: {c['why']}): {details(c)}")
         md.append(f"\n**My suggestion:** keep the {CURRENT_SHORT} for now.")
+    if cheaper:
+        md.append(f"\n**Same server as your {CURRENT_SHORT}, but cheaper than ${CURRENT_USD:.2f}/mo:**")
+        for r in cheaper[:TABLE_ROWS]:
+            md.append(f"- {'(new) ' if r['new'] else ''}{details(r)}")
     if unknown:
         md.append("\n**Unrecognised CPUs that pass RAM/SSD/budget (check by hand, "
                   "and add them to `CPUS` in watch.py):**")
@@ -357,16 +380,22 @@ def main():
                       f"${r['usd']:.2f} (€{r['eur']:.2f}), {price_diff(r['usd'])}/mo vs now")
     summary("\n".join(md) + "\n")
 
-    # ---- phone notification (only for NEW upgrades over the current server)
-    if new:
-        top = new[0]
-        title = (f"Upgrade: {top['cpu'].replace('AMD ', '').replace('Intel Core ', '')}, "
+    # ---- phone notification (only for NEW upgrades, or the same server for less)
+    if new or new_cheaper:
+        top = (new or new_cheaper)[0]
+        title = (f"{'Upgrade' if new else f'Cheaper {CURRENT_SHORT}'}: "
+                 f"{top['cpu'].replace('AMD ', '').replace('Intel Core ', '')}, "
                  f"{top['ram']}, {top['disks']} for ${top['usd']:.2f}/mo "
                  f"({price_diff(top['usd'])} vs your {CURRENT_SHORT}) (#{top['id']})")
-        body = ("\n\n".join(details(r) for r in new[:5])
-                + f"\n\nMy suggestion: {suggestion(new[0])}\n{HOURLY_NOTE}")
-        notify(title, body, click=top["link"], buttons=auction_buttons(new))
-        for r in new:
+        if new:
+            advice = f"My suggestion: {suggestion(new[0])}"
+        else:
+            advice = (f"Same hardware as your {CURRENT_SHORT} for "
+                      f"${CURRENT_USD - top['usd']:.2f}/mo less.")
+        body = ("\n\n".join(details(r) for r in (new + new_cheaper)[:5])
+                + f"\n\n{advice}\n{HOURLY_NOTE}")
+        notify(title, body, click=top["link"], buttons=auction_buttons(new + new_cheaper))
+        for r in new + new_cheaper:
             notified[r["id"]] = r["usd"]
         # keep the 200 most recent entries
         state["notified"] = dict(list(notified.items())[-200:])
@@ -379,7 +408,8 @@ def main():
         state["keepalive"] = today.isoformat()
 
     save_state(state)
-    log(f"{len(matches)} compatible upgrades, {len(new)} new, {len(unknown)} unknown CPUs")
+    log(f"{len(matches)} compatible upgrades, {len(new)} new, {len(cheaper)} cheaper {CURRENT_SHORT}, "
+        f"{len(unknown)} unknown CPUs")
 
 
 HOURLY_NOTE = (f"Hetzner bills hourly, so you can order the new one, migrate, "

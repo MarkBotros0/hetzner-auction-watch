@@ -1,9 +1,7 @@
 name: Hetzner auction watch
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (GitHub may start runs a few minutes late)
-  workflow_dispatch:          # adds a "Run workflow" button for manual runs
+  workflow_dispatch:          # started every minute by an external cron job (cron-job.org) via the GitHub API
 
 permissions:
   contents: write             # lets the job save state.json back to the repo
