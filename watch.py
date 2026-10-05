@@ -42,9 +42,8 @@ CURRENT_USD = 61.90        # per month excl. VAT, incl. IPv4
 VAT_RATE = 0.19
 LAPTOP_PASSMARK = 25800    # Intel i7-13700H
 MIN_PASSMARK = 20000       # >= ~35-40% faster than the 1700X
-MIN_RAM_GB = 64
-MIN_NVME_COUNT = 2         # NVMe only - SATA drives never count
-MIN_NVME_GB = 512
+MIN_RAM_GB = 32
+MIN_SSD_COUNT = 2          # NVMe or SATA SSDs of any size - HDDs never count
 MAX_TOTAL_USD = 80.00      # server + IPv4, per month, excl. VAT
 EUR_TO_USD = 1.115         # only used if the feed has no USD prices
 RENOTIFY_DROP_USD = 3.00   # notify again if a known server got this much cheaper
@@ -270,7 +269,8 @@ def main():
         ram = hw.get("RAM", {}).get("Size", 0) or 0
         drives = hw.get("Storage", {}).get("Details", {})
         nvme = [d for d in drives.get("nvme", []) or []]
-        big_nvme = [d for d in nvme if d >= MIN_NVME_GB]
+        sata = [d for d in drives.get("sata", []) or []]  # SATA SSDs (HDDs are listed separately)
+        ssds = nvme + sata
         prices = s.get("Prices", {})
         setup = usd(prices.get("setup"))
         # server + IPv4 = the price on the auction list (excl. VAT)
@@ -284,18 +284,14 @@ def main():
             fails.append(f"CPU too slow (~{mark:,} PassMark, needs ~{MIN_PASSMARK:,})")
         if ram < MIN_RAM_GB:
             fails.append(f"only {ram} GB RAM (needs {MIN_RAM_GB} GB)")
-        if len(big_nvme) < MIN_NVME_COUNT:
-            fails.append(f"{len(big_nvme) or 'no'} NVMe drive(s) of {MIN_NVME_GB} GB+ "
-                         f"(needs {MIN_NVME_COUNT}; SATA doesn't count)")
+        if len(ssds) < MIN_SSD_COUNT:
+            fails.append(f"{len(ssds) or 'no'} SSD(s) (needs {MIN_SSD_COUNT}; HDDs don't count)")
         if setup > 0:
             fails.append(f"${setup:.2f} setup fee")
         if total_usd > MAX_TOTAL_USD + 1e-9:
             fails.append(f"${total_usd - MAX_TOTAL_USD:.2f} over the ${MAX_TOTAL_USD:.0f} budget")
-        if len(big_nvme) >= MIN_NVME_COUNT:
-            disks = disks_text(big_nvme)
-        else:
-            disks = " + ".join(t for t in (disks_text(nvme), disks_text(drives.get("sata") or [], "SATA"),
-                                           disks_text(drives.get("hdd") or [], "HDD")) if t) or "no disks"
+        disks = " + ".join(t for t in (disks_text(nvme), disks_text(sata, "SATA SSD"),
+                                       disks_text(drives.get("hdd") or [], "HDD")) if t) or "no disks"
         row = {
             "id": str(s["Id"]),
             "cpu": name,
@@ -336,7 +332,7 @@ def main():
           f"Current server: {CURRENT_CPU}, ${CURRENT_USD:.2f}/mo. Prices are per month excl. VAT "
           f"incl. IPv4, as on the auction list (the order page adds {VAT_RATE:.0%} VAT).\n"]
     if matches:
-        md.append(f"| Id | CPU (c/t) | vs current {CURRENT_SHORT} | vs laptop | RAM | NVMe "
+        md.append(f"| Id | CPU (c/t) | vs current {CURRENT_SHORT} | vs laptop | RAM | Disks "
                   f"| $/mo excl. VAT incl. IPv4 | vs ${CURRENT_USD:.2f} now | DC | Next drop | New? |")
         md.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for r in matches[:TABLE_ROWS]:
@@ -354,7 +350,7 @@ def main():
             md.append(f"\n**Cheapest near-miss** (failed: {c['why']}): {details(c)}")
         md.append(f"\n**My suggestion:** keep the {CURRENT_SHORT} for now.")
     if unknown:
-        md.append("\n**Unrecognised CPUs that pass RAM/NVMe/budget (check by hand, "
+        md.append("\n**Unrecognised CPUs that pass RAM/SSD/budget (check by hand, "
                   "and add them to `CPUS` in watch.py):**")
         for r in unknown[:10]:
             md.append(f"- [{r['id']}]({r['link']}) {r['cpu']}, {r['ram']}, {r['disks']}, "

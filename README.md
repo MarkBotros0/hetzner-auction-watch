@@ -19,7 +19,7 @@ no Intel NIC, FSN1. $61.90/mo excl. VAT incl. IPv4 ($60.00 server + $1.90 IPv4)
 The goal is a clear upgrade over the 1700X, not just any server. A server matches when it has:
 
 - CPU at least ~20,000 PassMark (≥ ~35-40% faster than the 1700X); old i7/Xeon E3/E-2xxx/Xeon W-2145/Ryzen 5 3600/Ryzen 7 1700X etc. are skipped
-- 64 GB+ RAM, 2+ NVMe drives of 512 GB or more (SATA never counts)
+- 32 GB+ RAM, 2+ SSDs of any size (NVMe or SATA SSD; HDDs never count)
 - no setup fee, total ≤ $80/month excl. VAT including the IPv4 address
 
 **Prices:** the auction list shows prices excl. VAT and already including
