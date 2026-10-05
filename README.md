@@ -1,16 +1,35 @@
 # Hetzner auction watch
 
 Checks the Hetzner Server Auction every 5 minutes with GitHub Actions and
-sends a phone notification (via ntfy) on every run: a high-priority alert when
-a new server matches, and a low-priority status update otherwise
-(`STATUS_PRIORITY` in `watch.py`). A server matches when it has:
+sends a phone notification (via ntfy) only when a new upgrade over the current
+server shows up. Runs without an upgrade stay silent; their result is still in
+the run summary.
 
-- CPU at least ~20,000 PassMark (your i7-13700H is ~25,800); old i7/Xeon E3/E-2xxx/Ryzen 5 3600 etc. are skipped
-- 64 GB+ RAM, 2+ NVMe drives of 512 GB or more
-- no setup fee, total ≤ $80/month including the IPv4 address
+It is read-only: it never buys, reserves, cancels or logs in.
 
-Every run also writes a table of the top 5 compatible servers to the run's
-summary page (Actions tab → click a run).
+## Current server
+
+Bought 2026-10-05 from the Hetzner auction: AMD Ryzen 7 PRO 1700X
+(8C/16T, PassMark ~14,500), 64 GB DDR4 non-ECC, 2× 480 GB SATA Datacenter SSD,
+no Intel NIC, FSN1. $61.90/mo excl. VAT incl. IPv4 ($60.00 server + $1.90 IPv4)
+= $73.66/mo incl. 19% VAT. About 45% slower than the laptop (i7-13700H, PassMark ~25,800).
+
+## What counts as an upgrade
+
+The goal is a clear upgrade over the 1700X, not just any server. A server matches when it has:
+
+- CPU at least ~20,000 PassMark (≥ ~35-40% faster than the 1700X); old i7/Xeon E3/E-2xxx/Xeon W-2145/Ryzen 5 3600/Ryzen 7 1700X etc. are skipped
+- 64 GB+ RAM, 2+ NVMe drives of 512 GB or more (SATA never counts)
+- no setup fee, total ≤ $80/month excl. VAT including the IPv4 address
+
+**Prices:** the auction list shows prices excl. VAT and already including
+IPv4; the order page adds 19% VAT. Everything the watcher shows is USD excl.
+VAT (EUR in brackets), plus the difference vs. the current $61.90 (e.g. "+$12.40/mo").
+
+Every run also writes a table of the top 5 compatible upgrades to the run's
+summary page (Actions tab → click a run), with speed vs. the 1700X and the price
+difference. When there is no upgrade, it shows the cheapest near-miss (a server
+that fails just one rule) and why it failed.
 
 ## Setup (about 10 minutes)
 
@@ -42,15 +61,17 @@ summary page (Actions tab → click a run).
 ## Good to know
 
 - GitHub sometimes starts scheduled runs a few minutes late at busy times.
-- If the auction feed can't be fetched, every failed run sends a "check failed" notification.
-- Already-notified servers are stored in `state.json`; you get a high-priority
-  alert again only if one gets $3+ cheaper. Delete its line to be alerted again.
+- If the auction feed can't be fetched, the run stays silent and shows
+  "Check failed" in its summary.
+- Already-notified servers are stored in `state.json`; you get an alert again
+  only if one gets $3+ cheaper. Delete its line to be alerted again.
 - If a server with a CPU the script doesn't know fits the other rules, it's
   listed under "Unrecognised CPUs" in the run summary. Add it to `CPUS` in
   `watch.py` with its PassMark score to include it.
-- Every notification shows the best option right now with its details. When
-  nothing fits, it shows the closest one: the cheapest server that meets the
-  hardware rules but is over budget. Price drops are shown with their exact
+- Each notification shows the new upgrade(s) with their details. When nothing
+  fits, the run summary shows the cheapest near-miss and the rule it failed.
+- Hetzner bills hourly, so when an upgrade shows up you can order the new one,
+  migrate, then cancel the 1700X. Price drops are shown with their exact
   time in `TIMEZONE` (Africa/Cairo); the feed doesn't say how much a drop will be.
 - To change the rules (budget, RAM, etc.) edit the settings at the top of `watch.py`.
 - To stop: Actions tab → the workflow → **⋯ → Disable workflow**.

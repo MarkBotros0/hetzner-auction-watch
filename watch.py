@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Hetzner Server Auction watcher.
 
-Fetches the public auction feed, keeps servers that fit the rules below,
-writes a table of the top options to the GitHub Actions run summary every
-time, and sends a phone notification (ntfy.sh) every run: a high-priority
-alert for NEW matches, a low-priority status update otherwise.
+Goal: find a clear UPGRADE over the current server (see CURRENT SERVER below).
+Fetches the public auction feed, keeps servers that fit the upgrade rules below,
+writes a table of the top upgrades to the GitHub Actions run summary every
+time, and sends a phone notification (ntfy.sh) only when a NEW upgrade shows
+up. Runs without an upgrade (or with a failed fetch) stay silent.
+
+Read-only: it only reads the public feed. It never buys, reserves, cancels or
+logs in - ordering, migrating and cancelling are always done by hand.
 """
 import datetime as dt
 import json
@@ -21,16 +25,30 @@ FEED_URL = "https://www.hetzner.com/_resources/app/data/app/live_data_sb.json"
 AUCTION_URL = "https://www.hetzner.com/sb/"
 STATE_FILE = "state.json"
 
+# ---- CURRENT SERVER (bought 2026-10-05 from the Hetzner auction)
+# AMD Ryzen 7 PRO 1700X (8C/16T, PassMark ~14,500), 64 GB DDR4 non-ECC,
+# 2× 480 GB SATA Datacenter SSD, no Intel NIC, FSN1.
+# $60.00 server + $1.90 IPv4 = $61.90/mo excl. VAT = $73.66/mo incl. 19% VAT.
+# About 45% slower than the laptop (i7-13700H, PassMark ~25,800).
+CURRENT_CPU = "Ryzen 7 PRO 1700X"
+CURRENT_SHORT = "1700X"
+CURRENT_PASSMARK = 14500
+CURRENT_USD = 61.90        # per month excl. VAT, incl. IPv4
+
+# ---- Upgrade rules
+# Prices: the auction list shows prices excl. VAT and already including IPv4
+# (the feed has them as two fields, added up below); the order page adds VAT.
+# All prices shown are USD excl. VAT, with EUR in brackets.
+VAT_RATE = 0.19
 LAPTOP_PASSMARK = 25800    # Intel i7-13700H
-MIN_PASSMARK = 20000       # at most ~20-25% slower than the laptop
+MIN_PASSMARK = 20000       # >= ~35-40% faster than the 1700X
 MIN_RAM_GB = 64
-MIN_NVME_COUNT = 2
+MIN_NVME_COUNT = 2         # NVMe only - SATA drives never count
 MIN_NVME_GB = 512
 MAX_TOTAL_USD = 80.00      # server + IPv4, per month, excl. VAT
 EUR_TO_USD = 1.115         # only used if the feed has no USD prices
 RENOTIFY_DROP_USD = 3.00   # notify again if a known server got this much cheaper
 TABLE_ROWS = 5
-STATUS_PRIORITY = "low"    # ntfy priority of the every-run status ping ("min" = silent, "default" = sound)
 TIMEZONE = "Africa/Cairo"  # for showing when the next price drop happens
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
@@ -89,7 +107,8 @@ except zoneinfo.ZoneInfoNotFoundError:  # e.g. Windows without the tzdata packag
 
 # CPUs the user explicitly does not want, however cheap (skipped silently).
 EXCLUDE = re.compile(
-    r"xeon e3|xeon e5|xeon e-2|i7-6700|i7-7700|i7-8700|i9-9900|ryzen 5 3600|ryzen 7 2700",
+    r"xeon e3|xeon e5|xeon e-2|xeon w-2145|i7-6700|i7-7700|i7-8700|i9-9900|ryzen 5 3600"
+    r"|ryzen 7 1700x|ryzen 7 2700",
 )
 
 
@@ -187,15 +206,33 @@ def vs_laptop(mark):
     return f"~{abs(pct)}% {'faster' if pct > 0 else 'slower'}"
 
 
-def disks_text(nvme):
+def vs_current(mark):
+    """Speed vs the current 1700X, e.g. '~2.5x faster'."""
+    ratio = round(mark / CURRENT_PASSMARK, 1)
+    if ratio == 1:
+        return "about the same"
+    if ratio > 1:
+        return f"~{ratio:g}x faster"
+    return f"~{round(CURRENT_PASSMARK / mark, 1):g}x slower"
+
+
+def price_diff(usd_total):
+    """Monthly price difference vs the current server, e.g. '+$12.40'."""
+    d = round(usd_total - CURRENT_USD, 2)
+    return f"{'-' if d < 0 else '+'}${abs(d):.2f}"
+
+
+def disks_text(drives, kind="NVMe"):
     def size(gb):
         if gb >= 1000:
             return f"{gb // 1024} TB" if gb % 1024 == 0 else f"{gb / 1000:g} TB"
         return f"{gb} GB"
-    sizes = sorted(nvme, reverse=True)
+    sizes = sorted(drives, reverse=True)
+    if not sizes:
+        return ""
     if len(set(sizes)) == 1:
-        return f"{len(sizes)}× {size(sizes[0])} NVMe"
-    return " + ".join(size(s) for s in sizes) + " NVMe"
+        return f"{len(sizes)}× {size(sizes[0])} {kind}"
+    return " + ".join(size(s) for s in sizes) + f" {kind}"
 
 
 def next_drop(s, now):
@@ -221,47 +258,69 @@ def main():
         servers = fetch_feed()
     except Exception as e:  # noqa: BLE001
         log(str(e))
-        notify("Hetzner watch: check failed", f"{stamp}: {e}", priority="default")
         summary(f"### Hetzner auction check - {stamp}\n\n**Check failed:** {e}\n")
         return
 
-    # near = passes every rule except the budget (used to show the closest option)
+    # near = known CPU that fails exactly one upgrade rule (shown with the reason
+    # when there is no upgrade)
     matches, near, unknown = [], [], []
     for s in servers:
         hw = s.get("Hardware", {})
         name = hw.get("CPU", {}).get("Name", "?")
         ram = hw.get("RAM", {}).get("Size", 0) or 0
-        nvme = [d for d in hw.get("Storage", {}).get("Details", {}).get("nvme", []) or []]
+        drives = hw.get("Storage", {}).get("Details", {})
+        nvme = [d for d in drives.get("nvme", []) or []]
         big_nvme = [d for d in nvme if d >= MIN_NVME_GB]
         prices = s.get("Prices", {})
         setup = usd(prices.get("setup"))
+        # server + IPv4 = the price on the auction list (excl. VAT)
         total_usd = usd(prices.get("monthly")) + usd(s.get("IPPrices", {}).get("monthly"))
         total_eur = eur(prices.get("monthly")) + eur(s.get("IPPrices", {}).get("monthly"))
-        if ram < MIN_RAM_GB or len(big_nvme) < MIN_NVME_COUNT or setup > 0:
-            continue
-        over_budget = total_usd > MAX_TOTAL_USD + 1e-9
         kind, mark, ct = cpu_info(name)
+        if kind == "excluded":
+            continue
+        fails = []
+        if kind == "known" and mark < MIN_PASSMARK:
+            fails.append(f"CPU too slow (~{mark:,} PassMark, needs ~{MIN_PASSMARK:,})")
+        if ram < MIN_RAM_GB:
+            fails.append(f"only {ram} GB RAM (needs {MIN_RAM_GB} GB)")
+        if len(big_nvme) < MIN_NVME_COUNT:
+            fails.append(f"{len(big_nvme) or 'no'} NVMe drive(s) of {MIN_NVME_GB} GB+ "
+                         f"(needs {MIN_NVME_COUNT}; SATA doesn't count)")
+        if setup > 0:
+            fails.append(f"${setup:.2f} setup fee")
+        if total_usd > MAX_TOTAL_USD + 1e-9:
+            fails.append(f"${total_usd - MAX_TOTAL_USD:.2f} over the ${MAX_TOTAL_USD:.0f} budget")
+        if len(big_nvme) >= MIN_NVME_COUNT:
+            disks = disks_text(big_nvme)
+        else:
+            disks = " + ".join(t for t in (disks_text(nvme), disks_text(drives.get("sata") or [], "SATA"),
+                                           disks_text(drives.get("hdd") or [], "HDD")) if t) or "no disks"
         row = {
             "id": str(s["Id"]),
             "cpu": name,
             "ct": ct or "?",
             "mark": mark,
             "ram": f"{ram} GB{' ECC' if hw.get('RAM', {}).get('ecc') else ''}",
-            "disks": disks_text(big_nvme),
+            "disks": disks,
             "usd": round(total_usd, 2),
             "eur": round(total_eur, 2),
             "dc": s.get("Details", {}).get("Datacenter", {}).get("Name", "?"),
             "drop": next_drop(s, now),
             "link": f"{AUCTION_URL}#search={s['Id']}",
+            "why": "; ".join(fails),
         }
-        if kind == "known" and mark >= MIN_PASSMARK:
-            (near if over_budget else matches).append(row)
-        elif kind == "unknown" and not over_budget:
-            unknown.append(row)
+        if kind == "unknown":
+            if not fails:
+                unknown.append(row)
+        elif not fails:
+            matches.append(row)
+        elif len(fails) == 1:
+            near.append(row)
 
-    # As-fast-or-faster first, then best speed per dollar.
+    # As-fast-or-faster than the laptop first, then best speed per dollar.
     matches.sort(key=lambda r: (r["mark"] < LAPTOP_PASSMARK, -r["mark"] / r["usd"]))
-    # Closest to the budget first.
+    # Cheapest near-miss first.
     near.sort(key=lambda r: r["usd"])
 
     notified = state["notified"]
@@ -272,62 +331,49 @@ def main():
 
     # ---- run summary (always)
     md = [f"### Hetzner auction check - {stamp}",
-          f"{len(servers)} servers in the feed, **{len(matches)} compatible option(s)**, "
-          f"{len(new)} new.\n"]
+          f"{len(servers)} servers in the feed, **{len(matches)} compatible upgrade(s)**, "
+          f"{len(new)} new.",
+          f"Current server: {CURRENT_CPU}, ${CURRENT_USD:.2f}/mo. Prices are per month excl. VAT "
+          f"incl. IPv4, as on the auction list (the order page adds {VAT_RATE:.0%} VAT).\n"]
     if matches:
-        md.append("| Id | CPU (c/t) | vs laptop | RAM | NVMe | $/mo incl. IPv4 | DC | Next drop | New? |")
-        md.append("|---|---|---|---|---|---|---|---|---|")
+        md.append(f"| Id | CPU (c/t) | vs current {CURRENT_SHORT} | vs laptop | RAM | NVMe "
+                  f"| $/mo excl. VAT incl. IPv4 | vs ${CURRENT_USD:.2f} now | DC | Next drop | New? |")
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|")
         for r in matches[:TABLE_ROWS]:
             md.append(
-                f"| [{r['id']}]({r['link']}) | {r['cpu']} ({r['ct']}) | {vs_laptop(r['mark'])} "
-                f"| {r['ram']} | {r['disks']} | ${r['usd']:.2f} (€{r['eur']:.2f}) | {r['dc']} "
+                f"| [{r['id']}]({r['link']}) | {r['cpu']} ({r['ct']}) | {vs_current(r['mark'])} "
+                f"| {vs_laptop(r['mark'])} | {r['ram']} | {r['disks']} "
+                f"| ${r['usd']:.2f} (€{r['eur']:.2f}) | {price_diff(r['usd'])}/mo | {r['dc']} "
                 f"| {r['drop']} | {'yes' if r['new'] else 'no'} |"
             )
         md.append(f"\n**My suggestion:** {suggestion(matches[0])}")
     else:
-        md.append("No compatible options right now.")
+        md.append(f"No upgrade over your current {CURRENT_CPU} right now.")
         if near:
             c = near[0]
-            md.append(f"\n**Closest option** (${c['usd'] - MAX_TOTAL_USD:.2f} over budget): "
-                      f"{details(c)}")
+            md.append(f"\n**Cheapest near-miss** (failed: {c['why']}): {details(c)}")
+        md.append(f"\n**My suggestion:** keep the {CURRENT_SHORT} for now.")
     if unknown:
         md.append("\n**Unrecognised CPUs that pass RAM/NVMe/budget (check by hand, "
                   "and add them to `CPUS` in watch.py):**")
         for r in unknown[:10]:
             md.append(f"- [{r['id']}]({r['link']}) {r['cpu']}, {r['ram']}, {r['disks']}, "
-                      f"${r['usd']:.2f} (€{r['eur']:.2f})")
+                      f"${r['usd']:.2f} (€{r['eur']:.2f}), {price_diff(r['usd'])}/mo vs now")
     summary("\n".join(md) + "\n")
 
-    # ---- phone notification (every run: an alert for new matches, a quiet status otherwise)
+    # ---- phone notification (only for NEW upgrades over the current server)
     if new:
         top = new[0]
-        title = (f"Match: {top['cpu'].replace('AMD ', '').replace('Intel Core ', '')}, "
-                 f"{top['ram']}, {top['disks']} for ${top['usd']:.2f}/mo (#{top['id']})")
+        title = (f"Upgrade: {top['cpu'].replace('AMD ', '').replace('Intel Core ', '')}, "
+                 f"{top['ram']}, {top['disks']} for ${top['usd']:.2f}/mo "
+                 f"({price_diff(top['usd'])} vs your {CURRENT_SHORT}) (#{top['id']})")
         body = ("\n\n".join(details(r) for r in new[:5])
-                + f"\n\nMy suggestion: {suggestion(new[0])}"
-                + "\nHetzner bills hourly with no minimum term, so you can test and cancel cheaply.")
+                + f"\n\nMy suggestion: {suggestion(new[0])}\n{HOURLY_NOTE}")
         notify(title, body, click=top["link"], buttons=auction_buttons(new))
         for r in new:
             notified[r["id"]] = r["usd"]
         # keep the 200 most recent entries
         state["notified"] = dict(list(notified.items())[-200:])
-    else:
-        best = (matches or near or [None])[0]
-        if matches:
-            title = f"Hetzner check: {len(matches)} compatible, none new"
-            lines = [f"Best option now:\n{details(best)}"]
-            if matches[1:3]:
-                lines.append("\n".join(f"Also: #{r['id']} {r['cpu']}, ${r['usd']:.2f}/mo"
-                                       for r in matches[1:3]))
-        elif best:
-            title = f"Hetzner check: no match, closest ${best['usd']:.2f}/mo (#{best['id']})"
-            lines = [f"Closest option now (${best['usd'] - MAX_TOTAL_USD:.2f} over your "
-                     f"${MAX_TOTAL_USD:.0f} budget):\n{details(best)}"]
-        else:
-            title, lines = "Hetzner check: no compatible options", []
-        lines.append(f"{stamp}: {len(servers)} servers in the feed.")
-        notify(title, "\n\n".join(lines), click=best["link"] if best else AUCTION_URL,
-               priority=STATUS_PRIORITY, buttons=auction_buttons(matches or near))
 
     # Touch the state roughly monthly so the repo stays "active" and GitHub
     # does not auto-disable the schedule after 60 days without activity.
@@ -337,13 +383,18 @@ def main():
         state["keepalive"] = today.isoformat()
 
     save_state(state)
-    log(f"{len(matches)} compatible, {len(new)} new, {len(unknown)} unknown CPUs")
+    log(f"{len(matches)} compatible upgrades, {len(new)} new, {len(unknown)} unknown CPUs")
+
+
+HOURLY_NOTE = (f"Hetzner bills hourly, so you can order the new one, migrate, "
+               f"then cancel the {CURRENT_SHORT}.")
 
 
 def details(r):
-    return (f"#{r['id']} {r['cpu']} ({r['ct']}), {vs_laptop(r['mark'])} vs laptop; "
-            f"{r['ram']}; {r['disks']}; ${r['usd']:.2f}/mo (€{r['eur']:.2f}); {r['dc']}; "
-            f"next drop {r['drop']}\n{r['link']}")
+    return (f"#{r['id']} {r['cpu']} ({r['ct']}), {vs_current(r['mark'])} vs your {CURRENT_SHORT}, "
+            f"{vs_laptop(r['mark'])} vs laptop; {r['ram']}; {r['disks']}; "
+            f"${r['usd']:.2f}/mo (€{r['eur']:.2f}) excl. VAT, {price_diff(r['usd'])} vs now; "
+            f"{r['dc']}; next drop {r['drop']}\n{r['link']}")
 
 
 def auction_buttons(rows):
@@ -353,11 +404,13 @@ def auction_buttons(rows):
 
 
 def suggestion(r):
-    speed = vs_laptop(r["mark"])
-    speed_txt = "as fast as your laptop" if speed == "about the same" else f"{speed} than your laptop"
-    return (f"#{r['id']} ({r['cpu']}, {r['ram']}, {r['disks']}) at ${r['usd']:.2f}/mo - "
-            f"{speed_txt}, and the best speed per dollar among the "
-            f"{'as-fast-or-faster' if r['mark'] >= LAPTOP_PASSMARK else 'available'} options.")
+    d = round(r["usd"] - CURRENT_USD, 2)
+    cost = (f"for {price_diff(r['usd'])}/mo" if d > 0 else
+            "at the same price" if d == 0 else f"while saving ${-d:.2f}/mo")
+    return (f"Yes, switching from your {CURRENT_SHORT} is worth it now: #{r['id']} "
+            f"({r['cpu']}, {r['ram']}, {r['disks']}) at ${r['usd']:.2f}/mo (€{r['eur']:.2f}) "
+            f"is {vs_current(r['mark'])} {cost}, and the best speed per dollar among the "
+            f"{'laptop-speed-or-faster' if r['mark'] >= LAPTOP_PASSMARK else 'available'} upgrades.")
 
 
 def summary(text):
