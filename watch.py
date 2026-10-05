@@ -2,7 +2,7 @@
 """Hetzner Server Auction watcher.
 
 Goal: find a clear UPGRADE over the current server (see CURRENT SERVER below).
-Runs as a Vercel function (api/check.py), called every minute by cron-job.org;
+Exposed on Vercel by app.py (GET /api/check), called every minute by cron-job.org;
 `python watch.py` runs one check locally.
 Fetches the public auction feed, keeps servers that fit the upgrade rules below,
 returns a report of the top upgrades every time, and sends a phone

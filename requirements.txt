@@ -1,2 +1,3 @@
+flask
 # Time zone data for showing price-drop times in Africa/Cairo (the function image may not have it).
 tzdata

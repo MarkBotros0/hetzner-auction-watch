@@ -1,7 +1,7 @@
 # Hetzner auction watch
 
 Checks the Hetzner Server Auction every minute: cron-job.org calls a small
-Vercel function (`api/check.py`, which runs `watch.py`), and it sends a phone
+Flask app on Vercel (`app.py`, `GET /api/check` runs `watch.py`), and it sends a phone
 notification (via ntfy) only when a new upgrade over the current server shows
 up, or the same server as the current one is listed for less than you pay.
 Other runs stay silent; each run's report is the function's response (visible in
@@ -44,7 +44,7 @@ that fails just one rule) and why it failed.
    `hetzner-watch-7185a65316c3`. Anyone who knows the name can read it, so keep it private.
 
 2. **Vercel project.** On vercel.com click **Add New → Project**, import the
-   `hetzner-auction-watch` GitHub repo and deploy it (no build settings needed).
+   `hetzner-auction-watch` GitHub repo and deploy it (Vercel detects the Flask app in `app.py`; no build settings needed).
    Every push to `main` redeploys it.
 
 3. **State store.** In the project open **Storage → Create Database → Upstash
@@ -63,8 +63,9 @@ that fails just one rule) and why it failed.
    A `200` response is a successful check; open a run's details in cron-job.org
    to read its report.
 
-To test locally without Vercel: `python watch.py` (keeps state in `state.json`,
-and only prints the notification unless `NTFY_TOPIC` is set).
+To test locally without Vercel: `python watch.py` for one check, or `python app.py`
+and open http://127.0.0.1:5000/api/check (both keep state in `state.json`,
+and only print the notification unless `NTFY_TOPIC` is set).
 
 ## Good to know
 
