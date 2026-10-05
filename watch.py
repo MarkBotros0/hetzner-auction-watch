@@ -2,9 +2,11 @@
 """Hetzner Server Auction watcher.
 
 Goal: find a clear UPGRADE over the current server (see CURRENT SERVER below).
+Runs as a Vercel function (api/check.py), called every minute by cron-job.org;
+`python watch.py` runs one check locally.
 Fetches the public auction feed, keeps servers that fit the upgrade rules below,
-writes a table of the top upgrades to the GitHub Actions run summary every
-time, and sends a phone notification (ntfy.sh) only when a NEW upgrade shows
+returns a report of the top upgrades every time, and sends a phone
+notification (ntfy.sh) only when a NEW upgrade shows
 up, or the same server as the current one is listed for less than you pay.
 Runs without either (or with a failed fetch) stay silent. Tapping the
 notification opens the auction filtered to that server.
@@ -25,7 +27,12 @@ import zoneinfo
 # ---------------------------------------------------------------- settings
 FEED_URL = "https://www.hetzner.com/_resources/app/data/app/live_data_sb.json"
 AUCTION_URL = "https://www.hetzner.com/sb/"
+# Already-notified servers are kept in Upstash Redis (connected to the Vercel
+# project as a Marketplace store) or, when that isn't configured, in a local file.
 STATE_FILE = "state.json"
+STATE_KEY = "hetzner-auction-watch:state"
+REDIS_URL = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
+REDIS_TOKEN = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 
 # ---- CURRENT SERVER (bought 2026-10-05 from the Hetzner auction)
 # AMD Ryzen 7 PRO 1700X (8C/16T, PassMark ~14,500), 64 GB DDR4 non-ECC,
@@ -123,17 +130,34 @@ def log(msg):
     print(msg, flush=True)
 
 
+def redis(*command):
+    """Run one command through the Upstash Redis REST API, e.g. redis("GET", key)."""
+    req = urllib.request.Request(
+        REDIS_URL, data=json.dumps(command).encode(), method="POST",
+        headers={"Authorization": f"Bearer {REDIS_TOKEN}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)["result"]
+
+
 def load_state():
-    try:
-        with open(STATE_FILE) as f:
-            state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        state = {}
+    if REDIS_URL:
+        raw = redis("GET", STATE_KEY)
+        state = json.loads(raw) if raw else {}
+    else:
+        try:
+            with open(STATE_FILE) as f:
+                state = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            state = {}
     state.setdefault("notified", {})
     return state
 
 
 def save_state(state):
+    if REDIS_URL:
+        redis("SET", STATE_KEY, json.dumps(state, sort_keys=True))
+        return
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2, sort_keys=True)
         f.write("\n")
@@ -260,6 +284,7 @@ def next_drop(s, now):
 
 # -------------------------------------------------------------------- main
 def main():
+    """Run one check. Returns (ok, report): ok is False when the feed couldn't be fetched."""
     now = time.time()
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     state = load_state()
@@ -267,9 +292,9 @@ def main():
     try:
         servers = fetch_feed()
     except Exception as e:  # noqa: BLE001
-        log(str(e))
-        summary(f"### Hetzner auction check - {stamp}\n\n**Check failed:** {e}\n")
-        return
+        report = f"### Hetzner auction check - {stamp}\n\n**Check failed:** {e}\n"
+        log(report)
+        return False, report
 
     # near = known CPU that fails exactly one upgrade rule (shown with the reason
     # when there is no upgrade)
@@ -378,7 +403,8 @@ def main():
         for r in unknown[:10]:
             md.append(f"- [{r['id']}]({r['link']}) {r['cpu']}, {r['ram']}, {r['disks']}, "
                       f"${r['usd']:.2f} (€{r['eur']:.2f}), {price_diff(r['usd'])}/mo vs now")
-    summary("\n".join(md) + "\n")
+    report = "\n".join(md) + "\n"
+    log(report)
 
     # ---- phone notification (only for NEW upgrades, or the same server for less)
     if new or new_cheaper:
@@ -399,17 +425,11 @@ def main():
             notified[r["id"]] = r["usd"]
         # keep the 200 most recent entries
         state["notified"] = dict(list(notified.items())[-200:])
+        save_state(state)
 
-    # Touch the state roughly monthly so the repo stays "active" and GitHub
-    # does not auto-disable the schedule after 60 days without activity.
-    today = dt.date.today()
-    last = state.get("keepalive")
-    if not last or (today - dt.date.fromisoformat(last)).days >= 30:
-        state["keepalive"] = today.isoformat()
-
-    save_state(state)
     log(f"{len(matches)} compatible upgrades, {len(new)} new, {len(cheaper)} cheaper {CURRENT_SHORT}, "
         f"{len(unknown)} unknown CPUs")
+    return True, report
 
 
 HOURLY_NOTE = (f"Hetzner bills hourly, so you can order the new one, migrate, "
@@ -439,13 +459,5 @@ def suggestion(r):
             f"{'laptop-speed-or-faster' if r['mark'] >= LAPTOP_PASSMARK else 'available'} upgrades.")
 
 
-def summary(text):
-    log(text)
-    path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if path:
-        with open(path, "a") as f:
-            f.write(text)
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(0 if main()[0] else 1)

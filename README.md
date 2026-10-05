@@ -1,11 +1,12 @@
 # Hetzner auction watch
 
-Checks the Hetzner Server Auction every minute with GitHub Actions (started by
-an external cron job on cron-job.org) and sends a phone notification (via ntfy)
-only when a new upgrade over the current server shows up, or the same server as
-the current one is listed for less than you pay. Other runs stay silent; their
-result is still in the run summary. Tapping a notification opens the auction
-filtered to that one server (`https://www.hetzner.com/sb/?freetext=<Id>`).
+Checks the Hetzner Server Auction every minute: cron-job.org calls a small
+Vercel function (`api/check.py`, which runs `watch.py`), and it sends a phone
+notification (via ntfy) only when a new upgrade over the current server shows
+up, or the same server as the current one is listed for less than you pay.
+Other runs stay silent; each run's report is the function's response (visible in
+cron-job.org's history). Tapping a notification opens the auction filtered to
+that one server (`https://www.hetzner.com/sb/?freetext=<Id>`).
 
 It is read-only: it never buys, reserves, cancels or logs in.
 
@@ -32,56 +33,54 @@ $61.90/mo.
 IPv4; the order page adds 19% VAT. Everything the watcher shows is USD excl.
 VAT (EUR in brackets), plus the difference vs. the current $61.90 (e.g. "+$12.40/mo").
 
-Every run also writes a table of the top 5 compatible upgrades to the run's
-summary page (Actions tab → click a run), with speed vs. the 1700X and the price
-difference. When there is no upgrade, it shows the cheapest near-miss (a server
+Every run also returns a table of the top 5 compatible upgrades, with speed
+vs. the 1700X and the price difference. When there is no upgrade, it shows the cheapest near-miss (a server
 that fails just one rule) and why it failed.
 
-## Setup (about 10 minutes)
+## Setup
 
 1. **Phone alerts.** Install the free **ntfy** app (iOS / Android), tap **+**
    and subscribe to a hard-to-guess topic, for example
    `hetzner-watch-7185a65316c3`. Anyone who knows the name can read it, so keep it private.
 
-2. **Create the repository.** On github.com click **New repository**, name it
-   `hetzner-auction-watch`, choose **Public** and create it.
-   Public repos get unlimited free Actions minutes. A private repo would go
-   over the 2,000 free minutes a month at one run per minute.
+2. **Vercel project.** On vercel.com click **Add New → Project**, import the
+   `hetzner-auction-watch` GitHub repo and deploy it (no build settings needed).
+   Every push to `main` redeploys it.
 
-3. **Upload the files.** In the new repo click **uploading an existing file**
-   and drag in everything from this folder **including the `.github` folder**
-   (on macOS press Cmd+Shift+. in Finder to show hidden folders), then
-   **Commit changes**.
-   If the `.github` folder doesn't upload, click **Add file → Create new file**,
-   type `.github/workflows/hetzner-watch.yml` as the name, paste the file's
-   contents and commit.
+3. **State store.** In the project open **Storage → Create Database → Upstash
+   for Redis** (free plan) and connect it to the project. This adds
+   `KV_REST_API_URL` / `KV_REST_API_TOKEN`; already-notified servers are kept there.
 
-4. **Add the topic as a secret.** Repo **Settings → Secrets and variables →
-   Actions → New repository secret**: name `NTFY_TOPIC`, value your topic name.
+4. **Environment variables** (project **Settings → Environment Variables**, Production):
+   - `NTFY_TOPIC`: your ntfy topic name
+   - `CRON_SECRET`: a long random string (only callers that send it can run a check)
 
-5. **Test it.** Open the **Actions** tab (enable workflows if GitHub asks),
-   pick **Hetzner auction watch → Run workflow**. After ~30 seconds open the
-   run to see the table.
+   Then **Deployments → ⋯ → Redeploy** so the function picks them up.
 
-6. **Run it every minute.** GitHub's own schedule can't go below 5 minutes, so
-   an external cron job (cron-job.org, every minute) starts the workflow with
-   `POST https://api.github.com/repos/<owner>/hetzner-auction-watch/actions/workflows/hetzner-watch.yml/dispatches`
-   and body `{"ref":"main"}`, using a GitHub token with Actions write access.
+5. **Run it every minute.** On cron-job.org create (or edit) a job:
+   URL `https://<your-project>.vercel.app/api/check`, every minute, method GET,
+   and under **Advanced → Headers** add `Authorization: Bearer <CRON_SECRET>`.
+   A `200` response is a successful check; open a run's details in cron-job.org
+   to read its report.
+
+To test locally without Vercel: `python watch.py` (keeps state in `state.json`,
+and only prints the notification unless `NTFY_TOPIC` is set).
 
 ## Good to know
 
-- If the auction feed can't be fetched, the run stays silent and shows
-  "Check failed" in its summary.
-- Already-notified servers are stored in `state.json`; you get an alert again
-  only if one gets $3+ cheaper. Delete its line to be alerted again.
+- If the auction feed can't be fetched, the run stays silent and returns
+  `502` with "Check failed" in its report.
+- Already-notified servers are stored in Redis (key `hetzner-auction-watch:state`);
+  you get an alert again only if one gets $3+ cheaper. Delete the key to be
+  alerted about everything again.
 - If a server with a CPU the script doesn't know fits the other rules, it's
-  listed under "Unrecognised CPUs" in the run summary. Add it to `CPUS` in
+  listed under "Unrecognised CPUs" in the report. Add it to `CPUS` in
   `watch.py` with its PassMark score to include it.
 - Each notification shows the new upgrade(s) or cheaper 1700X with their details. When nothing
-  fits, the run summary shows the cheapest near-miss and the rule it failed.
+  fits, the report shows the cheapest near-miss and the rule it failed.
 - Hetzner bills hourly, so when an upgrade shows up you can order the new one,
   migrate, then cancel the 1700X. Price drops are shown with their exact
   time in `TIMEZONE` (Africa/Cairo); the feed doesn't say how much a drop will be.
-- To change the rules (budget, RAM, etc.) edit the settings at the top of `watch.py`.
-- To stop: pause the cron job on cron-job.org, or Actions tab → the workflow →
-  **⋯ → Disable workflow**.
+- To change the rules (budget, RAM, etc.) edit the settings at the top of `watch.py`
+  and push; Vercel redeploys automatically.
+- To stop: pause the cron job on cron-job.org.
