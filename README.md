@@ -14,29 +14,30 @@ It is read-only: it never buys, reserves, cancels or logs in.
 
 ## Current server
 
-Bought 2026-10-05 from the Hetzner auction: AMD Ryzen 7 PRO 1700X
-(8C/16T, PassMark ~14,500), 64 GB DDR4 non-ECC, 2× 480 GB SATA Datacenter SSD,
-no Intel NIC, FSN1. $61.90/mo excl. VAT incl. IPv4 ($60.00 server + $1.90 IPv4)
-= $73.66/mo incl. 19% VAT. About 45% slower than the laptop (i7-13700H, PassMark ~25,800).
+Bought 2026-10-06 from the Hetzner auction: AMD Ryzen 9 3900
+(12C/24T, PassMark ~30,500), 64 GB DDR4 ECC, 2× 512 GB M.2 NVMe SSD,
+1 Gbit Intel I210 NIC, HEL1. $67.90/mo excl. VAT incl. IPv4 ($66.00 server + $1.90 IPv4)
+= $80.80/mo incl. 19% VAT. About 18% faster than the laptop (i7-13700H, PassMark ~25,800).
+It replaced a Ryzen 7 PRO 1700X (FSN1, $61.90/mo).
 
 ## What counts as an upgrade
 
-The goal is a clear upgrade over the 1700X, not just any server. A server matches when it has:
+The goal is a clear upgrade over the 3900, not just any server. A server matches when it has:
 
-- CPU at least ~20,000 PassMark (≥ ~35-40% faster than the 1700X); old i7/Xeon E3/E-2xxx/Xeon W-2145/Ryzen 5 3600/Ryzen 7 1700X etc. are skipped
-- 32 GB+ RAM, 2+ SSDs of any size (NVMe or SATA SSD; HDDs never count)
+- CPU at least ~42,000 PassMark (≥ ~40% faster than the 3900); old i7/Xeon E3/E-2xxx/Xeon W-2145/Ryzen 5 3600/Ryzen 7 1700X etc. are skipped
+- 64 GB+ RAM, 2+ NVMe SSDs of any size (SATA SSDs and HDDs don't count)
 - no setup fee, total ≤ $80/month excl. VAT including the IPv4 address
 
-You're also alerted when the **same server as yours** (Ryzen 7 1700X, PRO or
-not, 64 GB+ RAM, 2+ SSDs of 480 GB+, no setup fee) is listed for less than
-$61.90/mo.
+You're also alerted when the **same server as yours** (Ryzen 9 3900, not the
+3900X, 64 GB+ RAM, 2+ NVMe SSDs of 512 GB+, no setup fee) is listed for less than
+$67.90/mo.
 
 **Prices:** the auction list shows prices excl. VAT and already including
 IPv4; the order page adds 19% VAT. Everything the watcher shows is USD excl.
-VAT (EUR in brackets), plus the difference vs. the current $61.90 (e.g. "+$12.40/mo").
+VAT (EUR in brackets), plus the difference vs. the current $67.90 (e.g. "+$12.40/mo").
 
 Every run also returns a table of the top 5 compatible upgrades, with speed
-vs. the 1700X and the price difference. When there is no upgrade, it shows the cheapest near-miss (a server
+vs. the 3900 and the price difference. When there is no upgrade, it shows the cheapest near-miss (a server
 that fails just one rule) and why it failed.
 
 ## Setup
@@ -81,10 +82,10 @@ and only print the notification unless `NTFY_TOPIC` is set).
 - If a server with a CPU the script doesn't know fits the other rules, it's
   listed under "Unrecognised CPUs" in the report. Add it to `CPUS` in
   `watch.py` with its PassMark score to include it.
-- Each notification shows the new upgrade(s) or cheaper 1700X with their details. When nothing
+- Each notification shows the new upgrade(s) or cheaper 3900 with their details. When nothing
   fits, the report shows the cheapest near-miss and the rule it failed.
 - Hetzner bills hourly, so when an upgrade shows up you can order the new one,
-  migrate, then cancel the 1700X. Price drops are shown with their exact
+  migrate, then cancel the old one. Price drops are shown with their exact
   time in `TIMEZONE` (Africa/Cairo); the feed doesn't say how much a drop will be.
 - To change the rules (budget, RAM, etc.) edit the settings at the top of `watch.py`
   and push; Vercel redeploys automatically.

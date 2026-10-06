@@ -34,20 +34,20 @@ STATE_KEY = "hetzner-auction-watch:state"
 REDIS_URL = os.environ.get("KV_REST_API_URL") or os.environ.get("UPSTASH_REDIS_REST_URL")
 REDIS_TOKEN = os.environ.get("KV_REST_API_TOKEN") or os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 
-# ---- CURRENT SERVER (bought 2026-10-05 from the Hetzner auction)
-# AMD Ryzen 7 PRO 1700X (8C/16T, PassMark ~14,500), 64 GB DDR4 non-ECC,
-# 2× 480 GB SATA Datacenter SSD, no Intel NIC, FSN1.
-# $60.00 server + $1.90 IPv4 = $61.90/mo excl. VAT = $73.66/mo incl. 19% VAT.
-# About 45% slower than the laptop (i7-13700H, PassMark ~25,800).
-CURRENT_CPU = "Ryzen 7 PRO 1700X"
-CURRENT_SHORT = "1700X"
-CURRENT_PASSMARK = 14500
-CURRENT_USD = 61.90        # per month excl. VAT, incl. IPv4
-# Also alert when the same server (Ryzen 7 1700X, PRO or not, 64 GB+ RAM,
-# 2+ SSDs of 480 GB+, no setup fee) is listed for less than CURRENT_USD.
-SAME_CPU = "ryzen 7 1700x"
+# ---- CURRENT SERVER (bought 2026-10-06 from the Hetzner auction)
+# AMD Ryzen 9 3900 (12C/24T, PassMark ~30,500), 64 GB DDR4 ECC,
+# 2× 512 GB M.2 NVMe SSD, 1 Gbit Intel I210 NIC, HEL1.
+# $66.00 server + $1.90 IPv4 = $67.90/mo excl. VAT = $80.80/mo incl. 19% VAT.
+# About 18% faster than the laptop (i7-13700H, PassMark ~25,800).
+CURRENT_CPU = "Ryzen 9 3900"
+CURRENT_SHORT = "3900"
+CURRENT_PASSMARK = 30500
+CURRENT_USD = 67.90        # per month excl. VAT, incl. IPv4
+# Also alert when the same server (Ryzen 9 3900, not the 3900X, 64 GB+ RAM,
+# 2+ NVMe SSDs of 512 GB+, no setup fee) is listed for less than CURRENT_USD.
+SAME_CPU = re.compile(r"\bryzen 9 3900(?![\w])")
 SAME_MIN_RAM_GB = 64
-SAME_MIN_SSD_GB = 480
+SAME_MIN_SSD_GB = 512
 
 # ---- Upgrade rules
 # Prices: the auction list shows prices excl. VAT and already including IPv4
@@ -55,9 +55,9 @@ SAME_MIN_SSD_GB = 480
 # All prices shown are USD excl. VAT, with EUR in brackets.
 VAT_RATE = 0.19
 LAPTOP_PASSMARK = 25800    # Intel i7-13700H
-MIN_PASSMARK = 20000       # >= ~35-40% faster than the 1700X
-MIN_RAM_GB = 32
-MIN_SSD_COUNT = 2          # NVMe or SATA SSDs of any size - HDDs never count
+MIN_PASSMARK = 42000       # >= ~40% faster than the 3900
+MIN_RAM_GB = 64            # no less than the current server
+MIN_NVME_COUNT = 2         # NVMe SSDs of any size - SATA SSDs and HDDs don't count
 MAX_TOTAL_USD = 80.00      # server + IPv4, per month, excl. VAT
 EUR_TO_USD = 1.115         # only used if the feed has no USD prices
 RENOTIFY_DROP_USD = 3.00   # notify again if a known server got this much cheaper
@@ -246,7 +246,7 @@ def vs_laptop(mark):
 
 
 def vs_current(mark):
-    """Speed vs the current 1700X, e.g. '~2.5x faster'."""
+    """Speed vs the current server, e.g. '~2.5x faster'."""
     ratio = round(mark / CURRENT_PASSMARK, 1)
     if ratio == 1:
         return "about the same"
@@ -312,7 +312,6 @@ def main():
         drives = hw.get("Storage", {}).get("Details", {})
         nvme = [d for d in drives.get("nvme", []) or []]
         sata = [d for d in drives.get("sata", []) or []]  # SATA SSDs (HDDs are listed separately)
-        ssds = nvme + sata
         prices = s.get("Prices", {})
         setup = usd(prices.get("setup"))
         # server + IPv4 = the price on the auction list (excl. VAT)
@@ -334,10 +333,10 @@ def main():
             "drop": next_drop(s, now),
             "link": f"{AUCTION_URL}?freetext={s['Id']}",  # opens the auction filtered to this server
         }
-        if SAME_CPU in norm_cpu(name):
+        if SAME_CPU.search(norm_cpu(name)):
             if (ram >= SAME_MIN_RAM_GB and setup == 0 and round(total_usd, 2) < CURRENT_USD
-                    and len([d for d in ssds if d >= SAME_MIN_SSD_GB]) >= MIN_SSD_COUNT):
-                cheaper.append(dict(row, mark=CURRENT_PASSMARK, ct="8/16"))
+                    and len([d for d in nvme if d >= SAME_MIN_SSD_GB]) >= MIN_NVME_COUNT):
+                cheaper.append(dict(row, mark=CURRENT_PASSMARK, ct="12/24"))
             continue
         if kind == "excluded":
             continue
@@ -346,8 +345,9 @@ def main():
             fails.append(f"CPU too slow (~{mark:,} PassMark, needs ~{MIN_PASSMARK:,})")
         if ram < MIN_RAM_GB:
             fails.append(f"only {ram} GB RAM (needs {MIN_RAM_GB} GB)")
-        if len(ssds) < MIN_SSD_COUNT:
-            fails.append(f"{len(ssds) or 'no'} SSD(s) (needs {MIN_SSD_COUNT}; HDDs don't count)")
+        if len(nvme) < MIN_NVME_COUNT:
+            fails.append(f"{len(nvme) or 'no'} NVMe SSD(s) (needs {MIN_NVME_COUNT}; "
+                         "SATA SSDs and HDDs don't count)")
         if setup > 0:
             fails.append(f"${setup:.2f} setup fee")
         if total_usd > MAX_TOTAL_USD + 1e-9:
