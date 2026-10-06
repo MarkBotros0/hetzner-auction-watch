@@ -8,8 +8,8 @@ Fetches the public auction feed, keeps servers that fit the upgrade rules below,
 returns a report of the top upgrades every time, and sends a phone
 notification (ntfy.sh) only when a NEW upgrade shows
 up, or the same server as the current one is listed for less than you pay.
-Runs without either (or with a failed fetch) stay silent. Tapping the
-notification opens the auction filtered to that server.
+At minute 00 of every hour it also sends a silent note (no sound or pop-up) with the closest
+match. Tapping a notification opens the auction filtered to that server.
 
 Read-only: it only reads the public feed. It never buys, reserves, cancels or
 logs in - ordering, migrating and cancelling are always done by hand.
@@ -410,7 +410,7 @@ def main():
     if new or new_cheaper:
         top = (new or new_cheaper)[0]
         title = (f"{'Upgrade' if new else f'Cheaper {CURRENT_SHORT}'}: "
-                 f"{top['cpu'].replace('AMD ', '').replace('Intel Core ', '')}, "
+                 f"{short_cpu(top['cpu'])}, "
                  f"{top['ram']}, {top['disks']} for ${top['usd']:.2f}/mo "
                  f"({price_diff(top['usd'])} vs your {CURRENT_SHORT}) (#{top['id']})")
         if new:
@@ -427,6 +427,10 @@ def main():
         state["notified"] = dict(list(notified.items())[-200:])
         save_state(state)
 
+    # ---- silent hourly report (the run at minute 00 of each hour)
+    if dt.datetime.fromtimestamp(now, dt.timezone.utc).minute == 0:
+        hourly_report(matches, near)
+
     log(f"{len(matches)} compatible upgrades, {len(new)} new, {len(cheaper)} cheaper {CURRENT_SHORT}, "
         f"{len(unknown)} unknown CPUs")
     return True, report
@@ -441,6 +445,29 @@ def details(r):
             f"{vs_laptop(r['mark'])} vs laptop; {r['ram']}; {r['disks']}; "
             f"${r['usd']:.2f}/mo (€{r['eur']:.2f}) excl. VAT, {price_diff(r['usd'])} vs now; "
             f"{r['dc']}; next drop {r['drop']}\n{r['link']}")
+
+
+def short_cpu(name):
+    return name.replace("AMD ", "").replace("Intel Core ", "")
+
+
+def hourly_report(matches, near):
+    """Silent (min priority: no sound or pop-up) note with the closest match right now."""
+    if matches:
+        r = matches[0]
+        label = "top upgrade"
+        body = f"{len(matches)} compatible upgrade(s) right now; the best:\n{details(r)}"
+    elif near:
+        r = near[0]
+        label = "no upgrade; closest"
+        body = f"Failed: {r['why']}\n{details(r)}"
+    else:
+        notify("Hourly: no upgrade or near-miss right now",
+               f"Nothing comes close to an upgrade over your {CURRENT_CPU}.", priority="min")
+        return
+    title = (f"Hourly: {label} #{r['id']} {short_cpu(r['cpu'])} "
+             f"${r['usd']:.2f}/mo ({price_diff(r['usd'])})")
+    notify(title, body, click=r["link"], priority="min")
 
 
 def auction_buttons(rows):

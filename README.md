@@ -4,9 +4,11 @@ Checks the Hetzner Server Auction every minute: cron-job.org calls a small
 Flask app on Vercel (`app.py`, `GET /api/check` runs `watch.py`), and it sends a phone
 notification (via ntfy) only when a new upgrade over the current server shows
 up, or the same server as the current one is listed for less than you pay.
-Other runs stay silent; each run's report is the function's response (visible in
-cron-job.org's history). Tapping a notification opens the auction filtered to
-that one server (`https://www.hetzner.com/sb/?freetext=<Id>`).
+Every hour on the hour it also sends a **silent** note (ntfy `min` priority: no sound,
+vibration or pop-up) with the closest match: the top upgrade, or else the
+cheapest near-miss and the rule it failed. Each run's report is the function's
+response (visible in cron-job.org's history). Tapping a notification opens the
+auction filtered to that one server (`https://www.hetzner.com/sb/?freetext=<Id>`).
 
 It is read-only: it never buys, reserves, cancels or logs in.
 
@@ -74,6 +76,8 @@ and only print the notification unless `NTFY_TOPIC` is set).
 - Already-notified servers are stored in Redis (key `hetzner-auction-watch:state`);
   you get an alert again only if one gets $3+ cheaper. Delete the key to be
   alerted about everything again.
+- The hourly note is sent by the run at minute 00 of each hour; if that run's
+  feed fetch fails, that hour's note is skipped.
 - If a server with a CPU the script doesn't know fits the other rules, it's
   listed under "Unrecognised CPUs" in the report. Add it to `CPUS` in
   `watch.py` with its PassMark score to include it.
