@@ -126,6 +126,11 @@ EXCLUDE = re.compile(
 
 
 # ----------------------------------------------------------------- helpers
+# Notifications contain emoji, which a Windows console code page can't print.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
+
+
 def log(msg):
     print(msg, flush=True)
 
@@ -414,12 +419,14 @@ def main():
                  f"{top['ram']}, {top['disks']} for ${top['usd']:.2f}/mo "
                  f"({price_diff(top['usd'])} vs your {CURRENT_SHORT}) (#{top['id']})")
         if new:
-            advice = f"My suggestion: {suggestion(new[0])}"
+            r = new[0]
+            advice = (f"Worth switching to #{r['id']} ({short_cpu(r['cpu'])}, {r['ram']} RAM, "
+                      f"{r['disks']}): best speed per dollar, "
+                      f"{vs_current(r['mark']).lstrip('~')} {switch_cost(r)}.")
         else:
-            advice = (f"Same hardware as your {CURRENT_SHORT} for "
-                      f"${CURRENT_USD - top['usd']:.2f}/mo less.")
-        body = ("\n\n".join(details(r) for r in (new + new_cheaper)[:5])
-                + f"\n\n{advice}\n{HOURLY_NOTE}")
+            advice = f"Same hardware as yours for ${CURRENT_USD - top['usd']:.2f}/mo less."
+        body = ("\n\n".join(card(r) for r in (new + new_cheaper)[:5])
+                + f"\n\n👉 {advice}\n{HOURLY_NOTE}")
         notify(title, body, click=top["link"], buttons=auction_buttons(new + new_cheaper))
         for r in new + new_cheaper:
             notified[r["id"]] = r["usd"]
@@ -436,8 +443,7 @@ def main():
     return True, report
 
 
-HOURLY_NOTE = (f"Hetzner bills hourly, so you can order the new one, migrate, "
-               f"then cancel the {CURRENT_SHORT}.")
+HOURLY_NOTE = f"Hetzner bills hourly: order, migrate, then cancel the {CURRENT_SHORT}."
 
 
 def details(r):
@@ -445,6 +451,23 @@ def details(r):
             f"{vs_laptop(r['mark'])} vs laptop; {r['ram']}; {r['disks']}; "
             f"${r['usd']:.2f}/mo (€{r['eur']:.2f}) excl. VAT, {price_diff(r['usd'])} vs now; "
             f"{r['dc']}; next drop {r['drop']}\n{r['link']}")
+
+
+def card(r):
+    """One server as a short block of lines for phone notifications."""
+    def than(phrase, who):
+        phrase = phrase.lstrip("~")
+        return f"{phrase} {'as' if phrase == 'about the same' else 'than'} {who}"
+    drop = r["drop"] if r["drop"] == "fixed price" else f"next drop {r['drop']}"
+    lines = [f"❌ {r['why']}"] if r.get("why") else []
+    return "\n".join(lines + [
+        f"💻 #{r['id']} · {short_cpu(r['cpu'])} ({r['ct']})",
+        f"⚡ {than(vs_current(r['mark']), f'your {CURRENT_SHORT}')} · "
+        f"{than(vs_laptop(r['mark']), 'laptop')}",
+        f"🧠 {r['ram']} RAM · 💾 {r['disks']}",
+        f"💵 ${r['usd']:.2f}/mo (€{r['eur']:.2f}) · {price_diff(r['usd'])} vs now",
+        f"📍 {r['dc']} · {drop}",
+    ])
 
 
 def short_cpu(name):
@@ -456,16 +479,17 @@ def hourly_report(matches, near):
     if matches:
         r = matches[0]
         label = "top upgrade"
-        body = f"{len(matches)} compatible upgrade(s) right now; the best:\n{details(r)}"
+        n = len(matches)
+        body = f"{n} upgrade{'s' if n > 1 else ''} right now. Best:\n{card(r)}"
     elif near:
         r = near[0]
-        label = "no upgrade; closest"
-        body = f"Failed: {r['why']}\n{details(r)}"
+        label = "closest"
+        body = f"No upgrade yet. Closest:\n{card(r)}"
     else:
-        notify("Hourly: no upgrade or near-miss right now",
+        notify("Hourly Report: nothing close to an upgrade",
                f"Nothing comes close to an upgrade over your {CURRENT_CPU}.", priority="min")
         return
-    title = (f"Hourly: {label} #{r['id']} {short_cpu(r['cpu'])} "
+    title = (f"Hourly Report: {label} #{r['id']} {short_cpu(r['cpu'])} "
              f"${r['usd']:.2f}/mo ({price_diff(r['usd'])})")
     notify(title, body, click=r["link"], priority="min")
 
@@ -476,13 +500,17 @@ def auction_buttons(rows):
         ("All auctions", AUCTION_URL)]
 
 
-def suggestion(r):
+def switch_cost(r):
+    """e.g. 'for +$18.00/mo', 'at the same price' or 'while saving $4.00/mo'."""
     d = round(r["usd"] - CURRENT_USD, 2)
-    cost = (f"for {price_diff(r['usd'])}/mo" if d > 0 else
+    return (f"for {price_diff(r['usd'])}/mo" if d > 0 else
             "at the same price" if d == 0 else f"while saving ${-d:.2f}/mo")
+
+
+def suggestion(r):
     return (f"Yes, switching from your {CURRENT_SHORT} is worth it now: #{r['id']} "
             f"({r['cpu']}, {r['ram']}, {r['disks']}) at ${r['usd']:.2f}/mo (€{r['eur']:.2f}) "
-            f"is {vs_current(r['mark'])} {cost}, and the best speed per dollar among the "
+            f"is {vs_current(r['mark'])} {switch_cost(r)}, and the best speed per dollar among the "
             f"{'laptop-speed-or-faster' if r['mark'] >= LAPTOP_PASSMARK else 'available'} upgrades.")
 
 
