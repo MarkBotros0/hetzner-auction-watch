@@ -420,9 +420,10 @@ def main():
                  f"({price_diff(top['usd'])} vs your {CURRENT_SHORT}) (#{top['id']})")
         if new:
             r = new[0]
-            advice = (f"Worth switching to #{r['id']} ({short_cpu(r['cpu'])}, {r['ram']} RAM, "
-                      f"{r['disks']}): best speed per dollar, "
-                      f"{vs_current(r['mark']).lstrip('~')} {switch_cost(r)}.")
+            advice = (f"Worth switching to #{r['id']} (best speed per dollar):\n"
+                      f"💻 {short_cpu(r['cpu'])} · 🧠 {r['ram']} RAM · 💾 {r['disks']}\n"
+                      f"⚡ {vs_current(r['mark']).lstrip('~')} than your {CURRENT_SHORT} · "
+                      f"💵 {price_diff(r['usd'])}/mo vs now")
         else:
             advice = f"Same hardware as yours for ${CURRENT_USD - top['usd']:.2f}/mo less."
         body = ("\n\n".join(card(r) for r in (new + new_cheaper)[:5])
@@ -500,17 +501,13 @@ def auction_buttons(rows):
         ("All auctions", AUCTION_URL)]
 
 
-def switch_cost(r):
-    """e.g. 'for +$18.00/mo', 'at the same price' or 'while saving $4.00/mo'."""
-    d = round(r["usd"] - CURRENT_USD, 2)
-    return (f"for {price_diff(r['usd'])}/mo" if d > 0 else
-            "at the same price" if d == 0 else f"while saving ${-d:.2f}/mo")
-
-
 def suggestion(r):
+    d = round(r["usd"] - CURRENT_USD, 2)
+    cost = (f"for {price_diff(r['usd'])}/mo" if d > 0 else
+            "at the same price" if d == 0 else f"while saving ${-d:.2f}/mo")
     return (f"Yes, switching from your {CURRENT_SHORT} is worth it now: #{r['id']} "
             f"({r['cpu']}, {r['ram']}, {r['disks']}) at ${r['usd']:.2f}/mo (€{r['eur']:.2f}) "
-            f"is {vs_current(r['mark'])} {switch_cost(r)}, and the best speed per dollar among the "
+            f"is {vs_current(r['mark'])} {cost}, and the best speed per dollar among the "
             f"{'laptop-speed-or-faster' if r['mark'] >= LAPTOP_PASSMARK else 'available'} upgrades.")
 
 
