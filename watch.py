@@ -8,8 +8,8 @@ Fetches the public auction feed, keeps servers that fit the upgrade rules below,
 returns a report of the top upgrades every time, and sends a phone
 notification (ntfy.sh) only when a NEW upgrade shows
 up, or the same server as the current one is listed for less than you pay.
-At minute 00 of every hour it also sends a silent note (no sound or pop-up) with the closest
-match. Tapping a notification opens the auction filtered to that server.
+Once a day at 12:00 (TIMEZONE) it also sends a silent note (no sound or pop-up) with the
+closest match. Tapping a notification opens the auction filtered to that server.
 
 Read-only: it only reads the public feed. It never buys, reserves, cancels or
 logs in - ordering, migrating and cancelling are always done by hand.
@@ -62,7 +62,8 @@ MAX_TOTAL_USD = 80.00      # server + IPv4, per month, excl. VAT
 EUR_TO_USD = 1.115         # only used if the feed has no USD prices
 RENOTIFY_DROP_USD = 3.00   # notify again if a known server got this much cheaper
 TABLE_ROWS = 5
-TIMEZONE = "Africa/Cairo"  # for showing when the next price drop happens
+REPORT_HOUR = 12           # daily silent report: the first run at/after this hour (TIMEZONE)
+TIMEZONE = "Africa/Cairo"  # for the daily report and showing when the next price drop happens
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 
@@ -435,9 +436,13 @@ def main():
         state["notified"] = dict(list(notified.items())[-200:])
         save_state(state)
 
-    # ---- silent hourly report (the run at minute 00 of each hour)
-    if dt.datetime.fromtimestamp(now, dt.timezone.utc).minute == 0:
-        hourly_report(matches, near)
+    # ---- silent daily report (the first run at/after REPORT_HOUR local time)
+    local_now = dt.datetime.fromtimestamp(now, LOCAL_TZ)
+    today = local_now.date().isoformat()
+    if local_now.hour >= REPORT_HOUR and state.get("last_report") != today:
+        daily_report(matches, near)
+        state["last_report"] = today
+        save_state(state)
 
     log(f"{len(matches)} compatible upgrades, {len(new)} new, {len(cheaper)} cheaper {CURRENT_SHORT}, "
         f"{len(unknown)} unknown CPUs")
@@ -475,7 +480,7 @@ def short_cpu(name):
     return name.replace("AMD ", "").replace("Intel Core ", "")
 
 
-def hourly_report(matches, near):
+def daily_report(matches, near):
     """Silent (min priority: no sound or pop-up) note with the closest match right now."""
     if matches:
         r = matches[0]
@@ -487,10 +492,10 @@ def hourly_report(matches, near):
         label = "closest"
         body = f"No upgrade yet. Closest:\n{card(r)}"
     else:
-        notify("Hourly Report: nothing close to an upgrade",
+        notify("Daily Report: nothing close to an upgrade",
                f"Nothing comes close to an upgrade over your {CURRENT_CPU}.", priority="min")
         return
-    title = (f"Hourly Report: {label} #{r['id']} {short_cpu(r['cpu'])} "
+    title = (f"Daily Report: {label} #{r['id']} {short_cpu(r['cpu'])} "
              f"${r['usd']:.2f}/mo ({price_diff(r['usd'])})")
     notify(title, body, click=r["link"], priority="min")
 
